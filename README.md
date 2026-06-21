@@ -119,6 +119,14 @@ Open a new shell, then run **`aizsh doctor`** to verify.
 * **Debounce trick:** the AI strategy `sleep`s briefly *first*; because
   zsh-autosuggestions kills the previous async worker on every keystroke, a
   fetch only survives (and hits the network) once you actually pause typing.
+* **Request cancellation:** when a worker is killed (you typed another key), the
+  daemon **aborts the in-flight model generation** instead of letting it finish.
+  Without this, a near-zero `AIZSH_DEBOUNCE` would queue a generation per keystroke
+  and the local model would backlog; with it, you can run `AIZSH_DEBOUNCE` ~0 and
+  only the *latest* keystroke actually generates.
+* **Typing into the ghost never re-queries:** if your buffer is just you typing
+  what the suggestion already shows, the remaining ghost is served from cache
+  (prefix-aware) in ~1 ms — the model only runs when you *diverge* from it.
 
 ---
 
@@ -153,10 +161,10 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_API_KEY` | — | bearer token for `openai` provider (if needed) |
 | `GEMINI_API_KEY` | (from Keychain) | required for `gemini` provider |
 | `AIZSH_COMPACT` | on for local, off for gemini | trim context for small models |
-| `AIZSH_DEBOUNCE` | `0.18` | seconds idle before an AI fetch fires |
+| `AIZSH_DEBOUNCE` | `0.18` | seconds idle before an AI fetch fires; can go ~0 (daemon cancels superseded calls) |
 | `AIZSH_MIN_LEN` | `2` | min chars before AI ghost text |
 | `AIZSH_HIST_N` | `15` | recent history lines sent as context |
-| `AIZSH_RATE_MAX` | `12` | max calls / 60s (matters for cloud only) |
+| `AIZSH_RATE_MAX` | `12` | max calls / 60s; **`0` = unlimited** (recommended for local) |
 | `AIZSH_FORCE_KEY` | `^o` | key to force an AI suggestion |
 | `AIZSH_DEBUG` | off | set to `1` to log to `$AIZSH_LOG` |
 
@@ -226,7 +234,9 @@ key with quota. (This is why this machine defaults to local Ollama instead.)
   loaded longer.
 - Use a smaller ghost model: `export AIZSH_GHOST_MODEL=qwen2.5-coder:0.5b`,
   then `aizsh restart`.
-- Lower `AIZSH_DEBOUNCE` for snappier (but more frequent) fetches.
+- For near-instant, per-keystroke updates set `export AIZSH_DEBOUNCE=0.02` and
+  `export AIZSH_RATE_MAX=0` (local has no quota). The daemon cancels superseded
+  generations, so this stays fast instead of backlogging the model.
 
 **Turn the AI off temporarily:** `aizsh off` (back on with `aizsh on`).
 

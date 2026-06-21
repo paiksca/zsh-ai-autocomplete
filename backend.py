@@ -35,7 +35,12 @@ import sys
 import threading
 import time
 import http.client
+import select
 from urllib.parse import urlparse
+
+# Ollama connections in flight, keyed by worker thread id, so the request handler
+# can abort a generation when the client disconnects (you typed another key).
+_ACTIVE_CONN = {}
 
 # --------------------------------------------------------------------------- #
 # Config (overridable via environment)                                         #
@@ -280,14 +285,18 @@ def _ollama_generate(model, system, user, schema=None, max_tokens=64, temp=0.2,
     if schema is not None and not thinking:
         body["format"] = "json"
     host, port = _hostport(OLLAMA_URL, 11434)
+    tid = threading.get_ident()
     try:
         c = http.client.HTTPConnection(host, port,
                                        timeout=THINK_TIMEOUT if thinking else HTTP_TIMEOUT)
+        _ACTIVE_CONN[tid] = c
         c.request("POST", "/api/generate", json.dumps(body).encode("utf-8"),
                   {"Content-Type": "application/json"})
         r = c.getresponse(); raw = r.read(); st = r.status; c.close()
     except (OSError, http.client.HTTPException) as e:
         return "", f"can't reach Ollama at {OLLAMA_URL} ({e}); is `ollama serve` running?"
+    finally:
+        _ACTIVE_CONN.pop(tid, None)
     if st != 200:
         log("ollama", model, "status", st)
         return "", _friendly_local(st, raw)
@@ -522,6 +531,8 @@ _RATE_LOCK = threading.Lock()
 
 
 def rate_ok():
+    if RATE_MAX <= 0:        # 0 = unlimited (sensible for local providers)
+        return True
     now = time.time()
     with _RATE_LOCK:
         while _CALLS and now - _CALLS[0] > 60:
@@ -550,6 +561,27 @@ def cache_put(key, val):
         _GCACHE[key] = (time.time(), val)
         if len(_GCACHE) > 256:
             _GCACHE.pop(next(iter(_GCACHE)))
+
+
+def cache_prefix_get(pwd, buffer):
+    """If `buffer` is the user typing *into* a line we already completed
+    (`base + remainder`), return the leftover tail without calling the model —
+    so typing exactly what the ghost shows never regenerates. Returns None when
+    the buffer has diverged from every cached completion (then we do regenerate)."""
+    now = time.time()
+    best_base = -1
+    best = None
+    with _GCACHE_LOCK:
+        for (kp, kb), (ts, suf) in _GCACHE.items():
+            if kp != pwd or not suf or now - ts >= CACHE_TTL:
+                continue
+            full = kb + suf
+            # buffer must extend the cached base and still be a prefix of its full line
+            if len(kb) < len(buffer) <= len(full) and \
+               buffer.startswith(kb) and full.startswith(buffer):
+                if len(kb) > best_base:           # most specific base wins
+                    best_base, best = len(kb), full[len(buffer):]
+    return best
 
 
 # --------------------------------------------------------------------------- #
@@ -739,13 +771,17 @@ def _ollama_fim(model, prefix, suffix):
                         "stop": ["<|endoftext|>", "<|file_sep|>", "<|fim_pad|>",
                                  FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE, "\n"]}}
     host, port = _hostport(OLLAMA_URL, 11434)
+    tid = threading.get_ident()
     try:
         c = http.client.HTTPConnection(host, port, timeout=HTTP_TIMEOUT)
+        _ACTIVE_CONN[tid] = c
         c.request("POST", "/api/generate", json.dumps(body).encode("utf-8"),
                   {"Content-Type": "application/json"})
         r = c.getresponse(); raw = r.read(); st = r.status; c.close()
     except (OSError, http.client.HTTPException) as e:
-        return "", str(e)
+        return "", str(e)        # closed by the handler on cancel → lands here
+    finally:
+        _ACTIVE_CONN.pop(tid, None)
     if st != 200:
         log("ollama fim status", st)
         return "", _friendly_local(st, raw)
@@ -798,6 +834,11 @@ def do_ghost(buffer, pwd, history):
     cached = cache_get(key)
     if cached is not None:
         return {"suggestion": cached}
+    # typing further into a suggestion we already made → serve the tail, no model call
+    pref = cache_prefix_get(pwd, buffer)
+    if pref is not None:
+        cache_put(key, pref)
+        return {"suggestion": pref}
     if not rate_ok():
         return {"suggestion": ""}
     ctx = context(pwd)
@@ -1005,14 +1046,42 @@ class Handler(socketserver.StreamRequestHandler):
         _LAST[0] = time.time()
         raw = line.rstrip(b"\n")
         mode = raw.split(US.encode(), 1)[0]
-        resp = handle_frame(raw)
+        if mode == b"ping":
+            self._send(b"pong\n"); return
+        if mode == b"shutdown":
+            self._send(b"bye\n"); os._exit(0)
+        # Run the work in a thread so we can ABORT it if the client disconnects —
+        # e.g. you typed another key and autosuggestions killed the worker. We then
+        # close the in-flight Ollama connection so it stops generating (no backlog).
+        holder = {}
+        t = threading.Thread(target=lambda: holder.__setitem__("r", handle_frame(raw)),
+                             daemon=True)
+        t.start()
+        sock = self.connection
+        while t.is_alive():
+            try:
+                ready, _, _ = select.select([sock], [], [], 0.1)
+            except (OSError, ValueError):
+                break
+            if ready:
+                try:
+                    closed = not sock.recv(1, socket.MSG_PEEK)
+                except OSError:
+                    closed = True
+                if closed:                                  # client gone → cancel
+                    conn = _ACTIVE_CONN.get(t.ident)
+                    if conn:
+                        try: conn.close()
+                        except Exception: pass
+                    return
+        if "r" in holder:
+            self._send(holder["r"])
+
+    def _send(self, data):
         try:
-            self.wfile.write(resp)
-            self.wfile.flush()
+            self.wfile.write(data); self.wfile.flush()
         except Exception:
             pass
-        if mode == b"shutdown":
-            os._exit(0)
 
 
 class Server(socketserver.ThreadingUnixStreamServer):
