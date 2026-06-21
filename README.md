@@ -1,4 +1,4 @@
-# ai-zsh
+# zsh-ai-autocomplete
 
 AI-powered, context-aware **ghost-text autocomplete** for zsh, plus a
 `prompt <natural language>` → shell-command translator with an approval step.
