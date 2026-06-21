@@ -68,9 +68,13 @@ _aizsh_via_socket() {
 # $1 = mode (ghost|prompt), $2 = text
 _aizsh_request() {
     emulate -L zsh
-    local mode="$1" text="$2" hist resp
-    hist="$(fc -ln -${AIZSH_HIST_N} 2>/dev/null)"
-    local frame="${mode}"$'\x1f'"$(_aizsh_b64 "$text")"$'\x1f'"$(_aizsh_b64 "$PWD")"$'\x1f'"$(_aizsh_b64 "$hist")"
+    local mode="$1" text="$2" resp
+    # Reuse the per-prompt PWD/history encodings cached by precmd (inherited via fork);
+    # fall back to computing them if precmd hasn't run yet. Only the buffer is encoded
+    # per keystroke. (`-` not `:-` for hist so an empty history isn't re-encoded.)
+    local pwd_b64="${_AIZSH_PWD_B64:-$(_aizsh_b64 "$PWD")}"
+    local hist_b64="${_AIZSH_HIST_B64-$(_aizsh_b64 "$(fc -ln -${AIZSH_HIST_N} 2>/dev/null)")}"
+    local frame="${mode}"$'\x1f'"$(_aizsh_b64 "$text")"$'\x1f'"${pwd_b64}"$'\x1f'"${hist_b64}"
     resp="$(_aizsh_via_socket "$frame")"
     if [[ -z "$resp" ]]; then
         resp="$(print -r -- "$frame" | "${=AIZSH_PYTHON}" "$AIZSH_BACKEND" oneshot 2>/dev/null)"
@@ -348,6 +352,14 @@ _aizsh_stash_fix() { typeset -g _AIZSH_FIX_EC="$1" _AIZSH_FIX_CMD="$2"; }
 
 _aizsh_precmd() {
     local ec=$?
+    # Pre-encode PWD + recent history ONCE per prompt (they only change on cd / a new
+    # command). Per-keystroke ghost workers are forks of this shell, so they inherit
+    # these and skip re-spawning base64/fc on every key. (Done before the early returns
+    # so it runs on every prompt; $? is already saved in `ec`.)
+    if _aizsh_have_ai; then
+        typeset -g _AIZSH_PWD_B64="$(_aizsh_b64 "$PWD")"
+        typeset -g _AIZSH_HIST_B64="$(_aizsh_b64 "$(fc -ln -${AIZSH_HIST_N} 2>/dev/null)")"
+    fi
     [[ -n $AIZSH_RAN ]] || return            # nothing actually ran (empty prompt)
     AIZSH_RAN=
     [[ "$AIZSH_AUTOFIX" == 1 ]] || return

@@ -111,7 +111,9 @@ FIM_ENABLED = _truthy(os.environ.get("AIZSH_FIM", "1"))
 FIM_PREFIX  = os.environ.get("AIZSH_FIM_PREFIX", "<|fim_prefix|>")
 FIM_SUFFIX  = os.environ.get("AIZSH_FIM_SUFFIX", "<|fim_suffix|>")
 FIM_MIDDLE  = os.environ.get("AIZSH_FIM_MIDDLE", "<|fim_middle|>")
-FIM_TOKENS  = int(os.environ.get("AIZSH_FIM_TOKENS", "24"))
+# 12 sits on the latency plateau: the coder model self-stops ~8-12 tokens, so a
+# higher cap mostly buys slow run-on completions (16→~900ms, 24→~1.3s vs 12→~570ms).
+FIM_TOKENS  = int(os.environ.get("AIZSH_FIM_TOKENS", "12"))
 
 HTTP_TIMEOUT = float(os.environ.get("AIZSH_HTTP_TIMEOUT", "20"))
 SOCK_PATH    = os.environ.get("AIZSH_SOCK") or os.path.join(
@@ -119,7 +121,7 @@ SOCK_PATH    = os.environ.get("AIZSH_SOCK") or os.path.join(
 DEBUG        = os.environ.get("AIZSH_DEBUG", "") not in ("", "0", "false")
 
 CACHE_TTL    = float(os.environ.get("AIZSH_CACHE_TTL", "45"))   # ghost cache seconds
-CTX_TTL      = float(os.environ.get("AIZSH_CTX_TTL", "8"))      # context cache seconds
+CTX_TTL      = float(os.environ.get("AIZSH_CTX_TTL", "20"))     # context cache seconds
 ZOXIDE_TTL   = 30.0
 RATE_MAX     = int(os.environ.get("AIZSH_RATE_MAX", "12"))      # max API calls / 60s (free tier ~15 RPM)
 IDLE_EXIT    = float(os.environ.get("AIZSH_IDLE_EXIT", "10800"))  # daemon self-exit (s)

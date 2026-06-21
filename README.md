@@ -151,6 +151,7 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama server |
 | `AIZSH_OLLAMA_KEEPALIVE` | `30m` | keep the model warm in RAM |
 | `AIZSH_FIM` | `1` (ollama) | ghost uses fill-in-middle for clean token-level completion |
+| `AIZSH_FIM_TOKENS` | `12` | max ghost completion length; latency scales with it (raise for longer completions, lower for snappier) |
 | `AIZSH_THINK` | `0` | enable thinking for `prompt` (qwen3.x) — better on hard tasks, but +25-50s |
 | `AIZSH_THINK_TOKENS` | `1500` | token budget when thinking |
 | `AIZSH_AUTOFIX` | `1` | suggest a fix (grey ghost text) when a command fails / isn't found |
