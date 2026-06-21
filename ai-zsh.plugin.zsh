@@ -89,13 +89,14 @@ _aizsh_fetch_spin() {
     local pid=$! skipped= i=1
     local chars=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
     trap 'skipped=1' INT
+    # spinner goes to STDERR so it never pollutes the captured JSON on stdout
     while kill -0 $pid 2>/dev/null; do
         [[ -n $skipped ]] && { kill $pid 2>/dev/null; break; }
-        printf '\r%s%s %s… (⌃C to skip)%s' "$DIM" "${chars[i]}" "$label" "$RST"
+        printf '\r%s%s %s… (⌃C to skip)%s' "$DIM" "${chars[i]}" "$label" "$RST" >&2
         i=$(( i % 10 + 1 )); command sleep 0.1
     done
     trap - INT
-    printf '\r\e[K'
+    printf '\r\e[K' >&2
     [[ -n $skipped ]] && { rm -f "$tmp"; return 1; }
     out="$(<"$tmp")"; rm -f "$tmp"
     [[ -n $out ]] || return 1
