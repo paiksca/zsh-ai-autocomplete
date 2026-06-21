@@ -212,12 +212,14 @@ _aizsh_spin_tick() {
     local fd=$1; read -u $fd 2>/dev/null
     # you started typing → stop silently (the fix is moot)
     if [[ -n $BUFFER ]]; then _aizsh_spin_kill && zle -M ""; return; fi
-    # fetch finished (or ~14s safety): show the outcome, then stop
-    if [[ -z $_ZSH_AUTOSUGGEST_ASYNC_FD ]] || (( ++_AIZSH_SPIN_N > 120 )); then
+    # fetch genuinely finished → show the outcome
+    if [[ -z $_ZSH_AUTOSUGGEST_ASYNC_FD ]]; then
         _aizsh_spin_kill
         [[ -n $POSTDISPLAY ]] && zle -M "" || zle -M "✦ ai-fix · no correction found"
         return
     fi
+    # safety: if the fetch is still running after ~30s, stop quietly (NOT "no correction")
+    (( ++_AIZSH_SPIN_N > 250 )) && { _aizsh_spin_kill && zle -M ""; return; }
     local f=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
     _AIZSH_SPIN_I=$(( _AIZSH_SPIN_I % 10 + 1 ))
     zle -M "✦ ai-fix ${f[_AIZSH_SPIN_I]} finding a correction…"

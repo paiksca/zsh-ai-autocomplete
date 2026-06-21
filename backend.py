@@ -85,6 +85,8 @@ GHOST_MODEL   = os.environ.get("AIZSH_GHOST_MODEL",  _dg)
 PROMPT_MODEL  = os.environ.get("AIZSH_PROMPT_MODEL", _dp)
 # next-command prediction reasons over history+context → use the instruct model
 PREDICT_MODEL = os.environ.get("AIZSH_PREDICT_MODEL", PROMPT_MODEL)
+# auto-fix should be FAST → reuse the always-warm ghost (coder) model by default
+FIX_MODEL     = os.environ.get("AIZSH_FIX_MODEL", GHOST_MODEL)
 
 # Small local models do better with tighter, more relevant context.
 def _tiny_model(m):
@@ -878,8 +880,9 @@ def do_fix(text, pwd, history):
     ctx = context(pwd)
     user = (f"The previous command failed (exit code {ec}).\nFailed command:\n{cmd}\n\n"
             + _ctx_block(pwd, ctx, history))
-    # auto-fix fires automatically → keep it fast (no thinking); the 14b is plenty.
-    res = _command_result(*generate(PROMPT_MODEL, FIX_SYSTEM, user,
+    # auto-fix fires automatically → keep it fast: the always-warm coder model,
+    # no thinking. (Override with AIZSH_FIX_MODEL.)
+    res = _command_result(*generate(FIX_MODEL, FIX_SYSTEM, user,
                                     schema=PROMPT_SCHEMA, max_tokens=300, temp=0.2,
                                     think=False))
     # suppress no-op "fixes" that just echo the failed command back
