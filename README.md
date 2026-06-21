@@ -37,17 +37,17 @@ It replaces the experience of `zsh-autosuggestions` (history-only) and the old
    The command is **pre-filled on your next prompt line, editable — nothing
    runs until you press Enter.** Aliases: `ai`, `ask`.
 3. **Automatic AI fix for failures** — when a command fails (or isn't found),
-   the AI automatically suggests a correction and pre-fills it for review:
+   the corrected command appears as **grey ghost text on your next prompt** —
+   **Tab to accept, Enter to dismiss**:
    ```
    $ gti status
-   ✦ ai-fix  Typo: 'gti' should be 'git'.
-   $ git status        ← pre-filled, just press Enter
+   zsh: command not found: gti
+   $ git status        ← grey ghost; Tab accepts, Enter dismisses
    ```
    Handles typos, wrong flags, missing `sudo`, `command not found` (incl.
-   `brew install …`). A spinner shows while it thinks (**⌃C to skip**); nothing
-   ever runs without you. Skips failures where non-zero is normal (`grep`,
-   `diff`, `test`, …) and aborts (Ctrl-C / exit ≥128). Toggle: `aizsh autofix
-   off`.
+   `brew install …`). Nothing runs without you. Skips failures where non-zero is
+   normal (`grep`, `diff`, `test`, …) and aborts (Ctrl-C / exit ≥128). Takes
+   priority over a generic prediction. Toggle: `aizsh autofix off`.
 4. **Uses zoxide & fzf when it helps** — the model is instructed to emit `z
    <kw>` to jump to frecent dirs, and to pipe through `fzf` when *you* need to
    choose (a file to edit, a branch to switch to, a process to kill). When it
@@ -144,8 +144,7 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_FIM` | `1` (ollama) | ghost uses fill-in-middle for clean token-level completion |
 | `AIZSH_THINK` | `0` | enable thinking for `prompt` (qwen3.x) — better on hard tasks, but +25-50s |
 | `AIZSH_THINK_TOKENS` | `1500` | token budget when thinking |
-| `AIZSH_AUTOFIX` | `1` | auto-suggest a fix when a command fails / isn't found |
-| `AIZSH_AUTOFIX_PREFILL` | `1` | pre-fill the fix for review (vs just print it) |
+| `AIZSH_AUTOFIX` | `1` | suggest a fix (grey ghost text) when a command fails / isn't found |
 | `AIZSH_AUTOFIX_SKIP` | grep, diff, test, … | leading commands where non-zero is normal (no fix) |
 | `AIZSH_PREDICT` | `1` | predict the next command on an empty prompt |
 | `AIZSH_BASE_URL` | — | OpenAI-compatible server (llama.cpp, LM Studio, vLLM) |

@@ -127,7 +127,15 @@ _zsh_autosuggest_strategy_ai() {
     local buffer="$1"
     _aizsh_have_ai || return
     if [[ -z "$buffer" ]]; then
-        # empty prompt → predict the likely next command (model may decline → empty)
+        # empty prompt: a just-failed command's fix takes priority over a generic
+        # prediction; both render as grey ghost text (Tab accepts, Enter dismisses).
+        if [[ -n "$_AIZSH_FIX_CMD" ]]; then
+            command sleep "$AIZSH_DEBOUNCE"
+            local fix
+            fix="$(_aizsh_request fix "${_AIZSH_FIX_EC}"$'\x1e'"${_AIZSH_FIX_CMD}" | _aizsh_json_get command)"
+            [[ -n "$fix" ]] && typeset -g suggestion="$fix"
+            return
+        fi
         [[ "$AIZSH_PREDICT" == 1 ]] || return
         command sleep "$AIZSH_DEBOUNCE"
         local pred
@@ -168,7 +176,12 @@ _zsh_autosuggest_fetch_suggestion() {
     local -a strategies
     local strategy
     if [[ -z "$1" ]]; then
-        [[ "$AIZSH_PREDICT" == 1 ]] && strategies=(ai) || strategies=()
+        # empty buffer → AI only, and only if there's a pending fix or prediction is on
+        if [[ -n "$_AIZSH_FIX_CMD" || "$AIZSH_PREDICT" == 1 ]]; then
+            strategies=(ai)
+        else
+            strategies=()
+        fi
     else
         strategies=(${=ZSH_AUTOSUGGEST_STRATEGY})
     fi
@@ -181,7 +194,12 @@ _zsh_autosuggest_fetch_suggestion() {
 
 # (3) kick off a prediction when a fresh (empty) prompt line appears
 _aizsh_line_init() {
-    [[ "$AIZSH_PREDICT" == 1 && -z "$BUFFER" ]] && _aizsh_have_ai && _zsh_autosuggest_fetch
+    [[ -z "$BUFFER" ]] || return
+    _aizsh_have_ai || return
+    if [[ -n "$_AIZSH_FIX_CMD" || "$AIZSH_PREDICT" == 1 ]]; then
+        _zsh_autosuggest_fetch
+        _AIZSH_FIX_CMD=    # consumed; the async worker already forked with its copy
+    fi
 }
 autoload -Uz add-zle-hook-widget
 add-zle-hook-widget line-init _aizsh_line_init 2>/dev/null
@@ -307,41 +325,25 @@ aizsh() {
 }
 
 # --- automatic AI fix for failed commands ----------------------------
-: ${AIZSH_AUTOFIX:=1}              # auto-suggest a fix when a command fails
-: ${AIZSH_AUTOFIX_PREFILL:=1}     # pre-fill the fix on the next prompt (vs just print it)
+# When a command fails (or isn't found), the corrected command is shown as grey
+# GHOST TEXT on the next prompt — Tab to accept, Enter to dismiss. We just stash
+# the failure here; the empty-prompt `ai` strategy (above) renders it, taking
+# priority over a generic prediction.
+: ${AIZSH_AUTOFIX:=1}              # suggest a fix (ghost text) when a command fails
 # leading commands where a non-zero exit is normal — never offer a fix for these
 : ${AIZSH_AUTOFIX_SKIP:="grep egrep fgrep rg ag ack diff colordiff cmp test pgrep pkill which type whence man less more fzf ssh nvim vim vi nano ping"}
 
 _aizsh_preexec() { AIZSH_LAST_CMD="$1"; AIZSH_RAN=1; }
 
-# $1 = exit code, $2 = failed command. Fetches a fix (spinner, ⌃C to skip) and
-# pre-fills it for review. Never runs anything.
-_aizsh_doctor() {
-    emulate -L zsh
-    local ec="$1" cmd="$2" json fixcmd expl danger
-    local DIM=$'\e[2m' RST=$'\e[0m' CYN=$'\e[36m' YEL=$'\e[33m' RED=$'\e[1;31m'
-    json="$(_aizsh_fetch_spin fix "${ec}"$'\x1e'"${cmd}" ai-fix)" || return
-    fixcmd="$(print -r -- "$json" | _aizsh_json_get command)"
-    [[ -n $fixcmd ]] || return
-    expl="$(print -r -- "$json" | _aizsh_json_get explanation)"
-    danger="$(print -r -- "$json" | _aizsh_json_get danger)"
-    print -r -- "${CYN}✦ ai-fix${RST} ${DIM}${expl}${RST}"
-    case "$danger" in
-        dangerous) print -r -- "  ${RED}⛔ dangerous — review carefully${RST}" ;;
-        caution)   print -r -- "  ${YEL}⚠ caution${RST}" ;;
-    esac
-    if [[ "$AIZSH_AUTOFIX_PREFILL" == 1 ]]; then
-        print -z -- "$fixcmd"
-    else
-        print -r -- "  ${fixcmd}"
-    fi
-}
+# Stash a fix request; the next empty prompt turns it into grey ghost text.
+_aizsh_stash_fix() { typeset -g _AIZSH_FIX_EC="$1" _AIZSH_FIX_CMD="$2"; }
 
 _aizsh_precmd() {
     local ec=$?
     [[ -n $AIZSH_RAN ]] || return            # nothing actually ran (empty prompt)
     AIZSH_RAN=
     [[ "$AIZSH_AUTOFIX" == 1 ]] || return
+    _aizsh_have_ai || return
     (( ec == 0 ))   && return
     (( ec >= 128 )) && return                # signals: Ctrl-C (130), SIGTERM, etc.
     (( ec == 127 )) && return                # owned by command_not_found_handler
@@ -349,14 +351,14 @@ _aizsh_precmd() {
     [[ -n $first ]] || return
     [[ " $AIZSH_AUTOFIX_SKIP " == *" $first "* ]] && return
     [[ $first == (prompt|ai|ask|aizsh) ]] && return
-    _aizsh_doctor "$ec" "$AIZSH_LAST_CMD"
+    _aizsh_stash_fix "$ec" "$AIZSH_LAST_CMD"
 }
 
 command_not_found_handler() {
     local cmd="$*"
     AIZSH_RAN=                               # don't double-handle from precmd
     print -u2 "zsh: command not found: $1"
-    [[ "$AIZSH_AUTOFIX" == 1 ]] && _aizsh_doctor 127 "$cmd"
+    [[ "$AIZSH_AUTOFIX" == 1 ]] && _aizsh_have_ai && _aizsh_stash_fix 127 "$cmd"
     return 127
 }
 
