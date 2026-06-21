@@ -678,7 +678,11 @@ def stats_suggest(buffer, pwd, prev):
         return ""
     prev = (prev or "").strip()
     now = time.time()
-    proj = (_context_cached(pwd) or {}).get("project", {})
+    # The once-per-prompt prediction (empty buffer) can afford to COMPUTE context if
+    # it's cold, so the instant guess is project-aware even right after a `cd`. The
+    # per-keystroke ghost path stays cache-only so it never blocks typing.
+    ctx = context(pwd) if not buffer else _context_cached(pwd)
+    proj = (ctx or {}).get("project", {})
     targets = proj.get("targets", []) or []          # commands actually runnable here
     ecos = _eco_prefixes(proj.get("types", []) or [])
 
