@@ -198,16 +198,53 @@ _zsh_autosuggest_fetch_suggestion() {
 }
 
 # (3) kick off a prediction when a fresh (empty) prompt line appears
+# --- async "✦ ai-fix" working spinner (RPROMPT, non-blocking) ---------
+# A background ticker pokes an fd every 0.12s; a zle -F handler advances the
+# braille frame in RPROMPT and stops once the fetch finishes or you start typing.
+_aizsh_spin_kill() {
+    [[ -n $_AIZSH_SPIN_FD ]] || return 1
+    zle -F $_AIZSH_SPIN_FD 2>/dev/null
+    exec {_AIZSH_SPIN_FD}<&- 2>/dev/null
+    _AIZSH_SPIN_FD=
+    return 0
+}
+_aizsh_spin_tick() {
+    local fd=$1; read -u $fd 2>/dev/null
+    # you started typing → stop silently (the fix is moot)
+    if [[ -n $BUFFER ]]; then _aizsh_spin_kill && zle -M ""; return; fi
+    # fetch finished (or ~14s safety): show the outcome, then stop
+    if [[ -z $_ZSH_AUTOSUGGEST_ASYNC_FD ]] || (( ++_AIZSH_SPIN_N > 120 )); then
+        _aizsh_spin_kill
+        [[ -n $POSTDISPLAY ]] && zle -M "" || zle -M "✦ ai-fix · no correction found"
+        return
+    fi
+    local f=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+    _AIZSH_SPIN_I=$(( _AIZSH_SPIN_I % 10 + 1 ))
+    zle -M "✦ ai-fix ${f[_AIZSH_SPIN_I]} finding a correction…"
+}
+_aizsh_spin_start() {
+    [[ -n $_AIZSH_SPIN_FD ]] && return
+    typeset -g _AIZSH_SPIN_I=0 _AIZSH_SPIN_N=0
+    exec {_AIZSH_SPIN_FD}< <(while sleep 0.12; do echo; done)
+    zle -F $_AIZSH_SPIN_FD _aizsh_spin_tick
+    zle -M "✦ ai-fix ⠋ finding a correction…"
+}
+_aizsh_line_finish() { _aizsh_spin_kill; }
+
 _aizsh_line_init() {
     [[ -z "$BUFFER" ]] || return
     _aizsh_have_ai || return
-    if [[ -n "$_AIZSH_FIX_CMD" || "$AIZSH_PREDICT" == 1 ]]; then
+    local fix=
+    [[ -n "$_AIZSH_FIX_CMD" ]] && fix=1
+    if [[ -n "$fix" || "$AIZSH_PREDICT" == 1 ]]; then
         _zsh_autosuggest_fetch
         _AIZSH_FIX_CMD=    # consumed; the async worker already forked with its copy
+        [[ -n "$fix" && "$AIZSH_AUTOFIX_HINT" == 1 ]] && _aizsh_spin_start
     fi
 }
 autoload -Uz add-zle-hook-widget
-add-zle-hook-widget line-init _aizsh_line_init 2>/dev/null
+add-zle-hook-widget line-init   _aizsh_line_init   2>/dev/null
+add-zle-hook-widget line-finish _aizsh_line_finish 2>/dev/null
 
 # --- Ctrl-O: force an AI suggestion right now (bypass debounce/gating) ---
 _aizsh_force_widget() {
@@ -359,10 +396,6 @@ _aizsh_precmd() {
     [[ " $AIZSH_AUTOFIX_SKIP " == *" $first "* ]] && return
     [[ $first == (prompt|ai|ask|aizsh) ]] && return
     _aizsh_stash_fix "$ec" "$AIZSH_LAST_CMD"
-    # instant, non-blocking marker so you know a fix is being fetched (the grey
-    # ghost itself appears a beat later on the prompt below)
-    [[ "$AIZSH_AUTOFIX_HINT" == 1 ]] && \
-        print -r -- $'\e[36m✦ ai-fix\e[0m \e[2mfinding a correction… (Tab to accept)\e[0m'
 }
 
 # Note: we deliberately do NOT define command_not_found_handler — zsh runs it in a

@@ -37,18 +37,19 @@ It replaces the experience of `zsh-autosuggestions` (history-only) and the old
    The command is **pre-filled on your next prompt line, editable — nothing
    runs until you press Enter.** Aliases: `ai`, `ask`.
 3. **Automatic AI fix for failures** — when a command fails (or isn't found),
-   the corrected command appears as **grey ghost text on your next prompt** —
-   **Tab to accept, Enter to dismiss**:
+   the corrected command appears as **grey ghost text on your next prompt**:
    ```
    $ gti status
    zsh: command not found: gti
-   ✦ ai-fix finding a correction…   ← instant marker (so you know it triggered)
-   $ git status        ← grey ghost a beat later; Tab to accept, or just keep typing
+   $ git status                       ← grey correction (Tab to accept)
+   ✦ ai-fix ⠹ finding a correction…   ← animated while it works; clears when done
    ```
-   The `✦ ai-fix` marker prints immediately (no waiting), then the grey correction
-   appears async — it's plain ghost text, so accept it with Tab or ignore it and
-   type whatever you want. Because predictions/autocomplete stay unlabeled, you can
-   tell a fix apart from them. Handles typos, wrong flags, missing `sudo`,
+   A non-blocking spinner shows it's working and clears when done — or shows
+   `✦ ai-fix · no correction found` if there's nothing to fix, so you're never left
+   guessing. The correction is plain grey ghost text: accept with Tab, or just keep
+   typing to ignore it (typing also auto-cancels the lookup). Predictions and
+   autocomplete stay unlabeled, so a fix is easy to tell apart. Handles typos,
+   wrong flags, missing `sudo`,
    `command not found` (incl. `brew install …`). Nothing runs without you. Skips
    failures where non-zero is normal (`grep`, `diff`, `test`, …) and aborts
    (Ctrl-C / exit ≥128). Takes priority over a generic prediction.
@@ -150,7 +151,7 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_THINK` | `0` | enable thinking for `prompt` (qwen3.x) — better on hard tasks, but +25-50s |
 | `AIZSH_THINK_TOKENS` | `1500` | token budget when thinking |
 | `AIZSH_AUTOFIX` | `1` | suggest a fix (grey ghost text) when a command fails / isn't found |
-| `AIZSH_AUTOFIX_HINT` | `1` | print a "✦ ai-fix…" marker when a fix is being fetched |
+| `AIZSH_AUTOFIX_HINT` | `1` | show the animated "✦ ai-fix…" working spinner while a fix is fetched |
 | `AIZSH_AUTOFIX_SKIP` | grep, diff, test, … | leading commands where non-zero is normal (no fix) |
 | `AIZSH_PREDICT` | `1` | predict the next command on an empty prompt |
 | `AIZSH_BASE_URL` | — | OpenAI-compatible server (llama.cpp, LM Studio, vLLM) |
