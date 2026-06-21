@@ -41,19 +41,14 @@ It replaces the experience of `zsh-autosuggestions` (history-only) and the old
    ```
    $ gti status
    zsh: command not found: gti
-   $ git status                       ← grey correction (Tab to accept)
-   ✦ ai-fix ⠹ finding a correction…   ← animated while it works; clears when done
+   $ git status        ← grey correction; Tab to accept, or just keep typing
    ```
-   A non-blocking spinner shows it's working and clears when done — or shows
-   `✦ ai-fix · no correction found` if there's nothing to fix, so you're never left
-   guessing. The correction is plain grey ghost text: accept with Tab, or just keep
-   typing to ignore it (typing also auto-cancels the lookup). Predictions and
-   autocomplete stay unlabeled, so a fix is easy to tell apart. Handles typos,
-   wrong flags, missing `sudo`,
-   `command not found` (incl. `brew install …`). Nothing runs without you. Skips
-   failures where non-zero is normal (`grep`, `diff`, `test`, …) and aborts
-   (Ctrl-C / exit ≥128). Takes priority over a generic prediction.
-   Toggles: `aizsh autofix off`; `AIZSH_AUTOFIX_HINT=0` to hide the marker.
+   Fixes run on the always-warm coder model so they're quick. The correction is
+   plain grey ghost text — accept with Tab, or ignore it and type whatever you want.
+   Handles typos, wrong flags, missing `sudo`, `command not found` (incl.
+   `brew install …`). Nothing runs without you. Skips failures where non-zero is
+   normal (`grep`, `diff`, `test`, …) and aborts (Ctrl-C / exit ≥128). Takes
+   priority over a generic prediction. Toggle: `aizsh autofix off`.
 4. **Uses zoxide & fzf when it helps** — the model is instructed to emit `z
    <kw>` to jump to frecent dirs, and to pipe through `fzf` when *you* need to
    choose (a file to edit, a branch to switch to, a process to kill). When it
@@ -151,7 +146,7 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_THINK` | `0` | enable thinking for `prompt` (qwen3.x) — better on hard tasks, but +25-50s |
 | `AIZSH_THINK_TOKENS` | `1500` | token budget when thinking |
 | `AIZSH_AUTOFIX` | `1` | suggest a fix (grey ghost text) when a command fails / isn't found |
-| `AIZSH_AUTOFIX_HINT` | `1` | show the animated "✦ ai-fix…" working spinner while a fix is fetched |
+| `AIZSH_FIX_MODEL` | ghost model | model for auto-fix (default = the always-warm coder, for speed) |
 | `AIZSH_AUTOFIX_SKIP` | grep, diff, test, … | leading commands where non-zero is normal (no fix) |
 | `AIZSH_PREDICT` | `1` | predict the next command on an empty prompt |
 | `AIZSH_BASE_URL` | — | OpenAI-compatible server (llama.cpp, LM Studio, vLLM) |
