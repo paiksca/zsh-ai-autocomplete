@@ -346,7 +346,8 @@ _aizsh_precmd() {
     _aizsh_have_ai || return
     (( ec == 0 ))   && return
     (( ec >= 128 )) && return                # signals: Ctrl-C (130), SIGTERM, etc.
-    (( ec == 127 )) && return                # owned by command_not_found_handler
+    # ec 127 = command not found — handled here (the command_not_found_handler runs
+    # in a subshell, so its typeset -g can't reach us; precmd is the main shell).
     local first=${${AIZSH_LAST_CMD%%[[:space:]]*}:t}
     [[ -n $first ]] || return
     [[ " $AIZSH_AUTOFIX_SKIP " == *" $first "* ]] && return
@@ -354,13 +355,9 @@ _aizsh_precmd() {
     _aizsh_stash_fix "$ec" "$AIZSH_LAST_CMD"
 }
 
-command_not_found_handler() {
-    local cmd="$*"
-    AIZSH_RAN=                               # don't double-handle from precmd
-    print -u2 "zsh: command not found: $1"
-    [[ "$AIZSH_AUTOFIX" == 1 ]] && _aizsh_have_ai && _aizsh_stash_fix 127 "$cmd"
-    return 127
-}
+# Note: we deliberately do NOT define command_not_found_handler — zsh runs it in a
+# subshell, so it can't stash state for the next prompt. precmd (main shell) catches
+# exit 127 instead, and zsh prints its own "command not found" message.
 
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _aizsh_preexec
