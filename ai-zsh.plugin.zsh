@@ -56,7 +56,9 @@ _aizsh_via_socket() {
     zsocket "$AIZSH_SOCK" 2>/dev/null || return 1
     fd=$REPLY
     print -u $fd -r -- "$frame"
-    IFS= read -r -u $fd reply
+    # timeout guards against a wedged daemon hanging `prompt` forever; the default
+    # comfortably exceeds the backend's THINK_TIMEOUT (120s) for thinking prompts.
+    IFS= read -r -t "${AIZSH_READ_TIMEOUT:-130}" -u $fd reply
     local rc=$?
     exec {fd}>&- 2>/dev/null
     (( rc == 0 )) && [[ -n "$reply" ]] && print -r -- "$reply"

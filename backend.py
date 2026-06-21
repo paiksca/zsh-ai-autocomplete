@@ -38,10 +38,6 @@ import http.client
 import select
 from urllib.parse import urlparse
 
-# Ollama connections in flight, keyed by worker thread id, so the request handler
-# can abort a generation when the client disconnects (you typed another key).
-_ACTIVE_CONN = {}
-
 # --------------------------------------------------------------------------- #
 # Config (overridable via environment)                                         #
 # --------------------------------------------------------------------------- #
@@ -285,18 +281,18 @@ def _ollama_generate(model, system, user, schema=None, max_tokens=64, temp=0.2,
     if schema is not None and not thinking:
         body["format"] = "json"
     host, port = _hostport(OLLAMA_URL, 11434)
-    tid = threading.get_ident()
+    th = threading.current_thread()
     try:
         c = http.client.HTTPConnection(host, port,
                                        timeout=THINK_TIMEOUT if thinking else HTTP_TIMEOUT)
-        _ACTIVE_CONN[tid] = c
+        th._aizsh_conn = c       # let the handler abort this if the client disconnects
         c.request("POST", "/api/generate", json.dumps(body).encode("utf-8"),
                   {"Content-Type": "application/json"})
         r = c.getresponse(); raw = r.read(); st = r.status; c.close()
     except (OSError, http.client.HTTPException) as e:
         return "", f"can't reach Ollama at {OLLAMA_URL} ({e}); is `ollama serve` running?"
     finally:
-        _ACTIVE_CONN.pop(tid, None)
+        th._aizsh_conn = None
     if st != 200:
         log("ollama", model, "status", st)
         return "", _friendly_local(st, raw)
@@ -572,7 +568,12 @@ def cache_prefix_get(pwd, buffer):
     best_base = -1
     best = None
     with _GCACHE_LOCK:
-        for (kp, kb), (ts, suf) in _GCACHE.items():
+        for k, (ts, suf) in _GCACHE.items():
+            # ghost keys are (pwd, buffer); other handlers (e.g. predict) share this
+            # cache with differently-shaped keys, so skip anything that isn't ours.
+            if not (isinstance(k, tuple) and len(k) == 2):
+                continue
+            kp, kb = k
             if kp != pwd or not suf or now - ts >= CACHE_TTL:
                 continue
             full = kb + suf
@@ -771,17 +772,17 @@ def _ollama_fim(model, prefix, suffix):
                         "stop": ["<|endoftext|>", "<|file_sep|>", "<|fim_pad|>",
                                  FIM_PREFIX, FIM_SUFFIX, FIM_MIDDLE, "\n"]}}
     host, port = _hostport(OLLAMA_URL, 11434)
-    tid = threading.get_ident()
+    th = threading.current_thread()
     try:
         c = http.client.HTTPConnection(host, port, timeout=HTTP_TIMEOUT)
-        _ACTIVE_CONN[tid] = c
+        th._aizsh_conn = c       # let the handler abort this if the client disconnects
         c.request("POST", "/api/generate", json.dumps(body).encode("utf-8"),
                   {"Content-Type": "application/json"})
         r = c.getresponse(); raw = r.read(); st = r.status; c.close()
     except (OSError, http.client.HTTPException) as e:
         return "", str(e)        # closed by the handler on cancel → lands here
     finally:
-        _ACTIVE_CONN.pop(tid, None)
+        th._aizsh_conn = None
     if st != 200:
         log("ollama fim status", st)
         return "", _friendly_local(st, raw)
@@ -861,6 +862,11 @@ def do_ghost(buffer, pwd, history):
 def _command_result(text, err):
     """Parse a model JSON reply into a normalized {command, explanation, danger, alternatives}."""
     data = _parse_json(text)
+    # the model may return a bare JSON string / list / number instead of an object
+    if isinstance(data, str):
+        data = {"command": data}
+    elif not isinstance(data, dict):
+        data = {}
 
     def _as_cmd(x):
         # models sometimes return a {command, explanation} object instead of a string
@@ -1049,7 +1055,10 @@ class Handler(socketserver.StreamRequestHandler):
         if mode == b"ping":
             self._send(b"pong\n"); return
         if mode == b"shutdown":
-            self._send(b"bye\n"); os._exit(0)
+            self._send(b"bye\n")
+            try: os.unlink(SOCK_PATH)
+            except OSError: pass
+            os._exit(0)
         # Run the work in a thread so we can ABORT it if the client disconnects —
         # e.g. you typed another key and autosuggestions killed the worker. We then
         # close the in-flight Ollama connection so it stops generating (no backlog).
@@ -1069,7 +1078,7 @@ class Handler(socketserver.StreamRequestHandler):
                 except OSError:
                     closed = True
                 if closed:                                  # client gone → cancel
-                    conn = _ACTIVE_CONN.get(t.ident)
+                    conn = getattr(t, "_aizsh_conn", None)
                     if conn:
                         try: conn.close()
                         except Exception: pass
@@ -1109,6 +1118,8 @@ def _watchdog():
         time.sleep(60)
         if time.time() - _LAST[0] > IDLE_EXIT:
             log("idle exit")
+            try: os.unlink(SOCK_PATH)
+            except OSError: pass
             os._exit(0)
 
 
