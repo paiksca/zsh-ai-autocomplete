@@ -43,10 +43,11 @@ It replaces the experience of `zsh-autosuggestions` (history-only) and the old
    $ gti status
    zsh: command not found: gti
    ✦ ai-fix finding a correction…   ← instant marker (so you know it triggered)
-   $ git status        ← grey ghost a beat later; Tab accepts, Enter dismisses
+   $ git status        ← grey ghost a beat later; Tab to accept, or just keep typing
    ```
    The `✦ ai-fix` marker prints immediately (no waiting), then the grey correction
-   appears async — and because predictions/autocomplete stay unlabeled, you can
+   appears async — it's plain ghost text, so accept it with Tab or ignore it and
+   type whatever you want. Because predictions/autocomplete stay unlabeled, you can
    tell a fix apart from them. Handles typos, wrong flags, missing `sudo`,
    `command not found` (incl. `brew install …`). Nothing runs without you. Skips
    failures where non-zero is normal (`grep`, `diff`, `test`, …) and aborts

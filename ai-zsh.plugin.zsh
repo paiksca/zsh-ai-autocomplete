@@ -362,7 +362,7 @@ _aizsh_precmd() {
     # instant, non-blocking marker so you know a fix is being fetched (the grey
     # ghost itself appears a beat later on the prompt below)
     [[ "$AIZSH_AUTOFIX_HINT" == 1 ]] && \
-        print -r -- $'\e[36m✦ ai-fix\e[0m \e[2mfinding a correction… (Tab to accept · Enter to dismiss)\e[0m'
+        print -r -- $'\e[36m✦ ai-fix\e[0m \e[2mfinding a correction… (Tab to accept)\e[0m'
 }
 
 # Note: we deliberately do NOT define command_not_found_handler — zsh runs it in a
