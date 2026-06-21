@@ -18,15 +18,19 @@
 : ${AIZSH_HIST_N:=15}         # recent history lines sent as context
 : ${AIZSH_FORCE_KEY:=^o}      # key to force an AI ghost suggestion on demand
 : ${AIZSH_PREDICT:=1}         # predict the next command on an empty prompt
+: ${AIZSH_STATS:=1}           # instant statistical ghost (frecency/dir/sequence) under the LLM
+: ${AIZSH_WORD_ACCEPT_KEY:=^[[1;5C}   # Ctrl-Right: accept the next word of the ghost
 export AIZSH_SOCK             # backend (daemon + oneshot) must use the same path
 
 # AI ghost text needs async, otherwise every keystroke would block on the network.
 ZSH_AUTOSUGGEST_USE_ASYNC=1
-# AI-first, history-aware: try AI, fall back to local history instantly if AI is
-# empty / rate-limited / offline.  (Leave a user's explicit non-default alone.)
+# Order: AI (smart) → stats (instant local) → history. First non-empty wins; the
+# instant stats placeholder is rendered synchronously and the LLM refines it.
 typeset -ga ZSH_AUTOSUGGEST_STRATEGY
-if [[ ${#ZSH_AUTOSUGGEST_STRATEGY} -eq 0 || "${ZSH_AUTOSUGGEST_STRATEGY[*]}" == "history" ]]; then
-    ZSH_AUTOSUGGEST_STRATEGY=(ai history)
+if [[ ${#ZSH_AUTOSUGGEST_STRATEGY} -eq 0 \
+      || "${ZSH_AUTOSUGGEST_STRATEGY[*]}" == "history" \
+      || "${ZSH_AUTOSUGGEST_STRATEGY[*]}" == "ai history" ]]; then
+    ZSH_AUTOSUGGEST_STRATEGY=(ai stats history)
 fi
 
 zmodload zsh/net/socket 2>/dev/null   # for the pure-zsh daemon client
@@ -65,7 +69,8 @@ _aizsh_via_socket() {
 }
 
 # Send a request (socket, else one-shot python) and echo the decoded JSON.
-# $1 = mode (ghost|prompt), $2 = text
+# $1 = mode (ghost|prompt|stats|…), $2 = text, $3 = optional field-4 override
+# (stats/record send the previous command there instead of history context).
 _aizsh_request() {
     emulate -L zsh
     local mode="$1" text="$2" resp
@@ -73,8 +78,13 @@ _aizsh_request() {
     # fall back to computing them if precmd hasn't run yet. Only the buffer is encoded
     # per keystroke. (`-` not `:-` for hist so an empty history isn't re-encoded.)
     local pwd_b64="${_AIZSH_PWD_B64:-$(_aizsh_b64 "$PWD")}"
-    local hist_b64="${_AIZSH_HIST_B64-$(_aizsh_b64 "$(fc -ln -${AIZSH_HIST_N} 2>/dev/null)")}"
-    local frame="${mode}"$'\x1f'"$(_aizsh_b64 "$text")"$'\x1f'"${pwd_b64}"$'\x1f'"${hist_b64}"
+    local extra_b64
+    if (( $# >= 3 )); then
+        extra_b64="$(_aizsh_b64 "$3")"
+    else
+        extra_b64="${_AIZSH_HIST_B64-$(_aizsh_b64 "$(fc -ln -${AIZSH_HIST_N} 2>/dev/null)")}"
+    fi
+    local frame="${mode}"$'\x1f'"$(_aizsh_b64 "$text")"$'\x1f'"${pwd_b64}"$'\x1f'"${extra_b64}"
     resp="$(_aizsh_via_socket "$frame")"
     if [[ -z "$resp" ]]; then
         resp="$(print -r -- "$frame" | "${=AIZSH_PYTHON}" "$AIZSH_BACKEND" oneshot 2>/dev/null)"
@@ -187,9 +197,12 @@ _zsh_autosuggest_fetch_suggestion() {
     local -a strategies
     local strategy
     if [[ -z "$1" ]]; then
-        # empty buffer → AI only, and only if there's a pending fix or prediction is on
-        if [[ -n "$_AIZSH_FIX_CMD" || "$AIZSH_PREDICT" == 1 ]]; then
+        # empty buffer → AI only (history would just echo the last command). A pending
+        # fix is AI-only; otherwise predict via AI then fall back to the stats guess.
+        if [[ -n "$_AIZSH_FIX_CMD" ]]; then
             strategies=(ai)
+        elif [[ "$AIZSH_PREDICT" == 1 ]]; then
+            strategies=(ai stats)
         else
             strategies=()
         fi
@@ -201,6 +214,55 @@ _zsh_autosuggest_fetch_suggestion() {
         [[ "$suggestion" != "$1"* ]] && unset suggestion
         [[ -n "$suggestion" ]] && break
     done
+}
+
+# --- statistical layer: instant local guess (frecency/dir/sequence) ----
+# Socket-only (never one-shot — that would fork python per keystroke and read an
+# empty store); short timeout so a slow/missing daemon never blocks typing.
+_aizsh_stats_lookup() {   # $1 = buffer; echoes the full statistical suggestion
+    [[ -S "$AIZSH_SOCK" ]] || return 1
+    local frame resp
+    frame="stats"$'\x1f'"$(_aizsh_b64 "$1")"$'\x1f'"${_AIZSH_PWD_B64:-$(_aizsh_b64 "$PWD")}"$'\x1f'"$(_aizsh_b64 "$AIZSH_PREV_CMD")"
+    resp="$(AIZSH_READ_TIMEOUT=0.3 _aizsh_via_socket "$frame")" || return 1
+    [[ -n "$resp" ]] && _aizsh_b64d "$resp" | _aizsh_json_get suggestion
+}
+
+# stats strategy (async fallback): used when the LLM is empty/slow/offline
+_zsh_autosuggest_strategy_stats() {
+    emulate -L zsh
+    [[ "$AIZSH_STATS" == 1 ]] || return
+    local buffer="$1" full
+    if [[ -n "$buffer" ]]; then
+        (( ${#buffer} >= AIZSH_MIN_LEN )) || return
+        [[ "${buffer%%[[:space:]]*}" == (prompt|ai|ask) ]] && return
+    fi
+    full="$(_aizsh_stats_lookup "$buffer")"
+    [[ -n "$full" && "$full" == "$buffer"* ]] && typeset -g suggestion="$full"
+}
+
+# Override _zsh_autosuggest_fetch: render the INSTANT statistical guess synchronously,
+# THEN kick off the async LLM fetch which refines/replaces it. This is what makes the
+# ghost feel instant despite model latency. (modify already cleared POSTDISPLAY and
+# handled type-through, so we only run when an actual fetch is needed.)
+_zsh_autosuggest_fetch() {
+    if [[ "$AIZSH_STATS" == 1 ]]; then
+        local _full=
+        if [[ -n "$BUFFER" ]]; then
+            if (( ${#BUFFER} >= AIZSH_MIN_LEN )) && [[ "${BUFFER%%[[:space:]]*}" != (prompt|ai|ask) ]]; then
+                _full="$(_aizsh_stats_lookup "$BUFFER")"
+            fi
+        elif [[ -z "$_AIZSH_FIX_CMD" && "$AIZSH_PREDICT" == 1 ]]; then
+            _full="$(_aizsh_stats_lookup "")"
+        fi
+        [[ -n "$_full" && "$_full" == "$BUFFER"* ]] && POSTDISPLAY="${_full#$BUFFER}"
+    fi
+    if (( ${+ZSH_AUTOSUGGEST_USE_ASYNC} )); then
+        _zsh_autosuggest_async_request "$BUFFER"
+    else
+        local suggestion
+        _zsh_autosuggest_fetch_suggestion "$BUFFER"
+        _zsh_autosuggest_suggest "$suggestion"
+    fi
 }
 
 # (3) kick off a fix/prediction when a fresh (empty) prompt line appears;
@@ -229,6 +291,11 @@ _aizsh_force_widget() {
 }
 zle -N _aizsh_force_widget
 bindkey "$AIZSH_FORCE_KEY" _aizsh_force_widget
+
+# --- word-by-word acceptance: take the next word of the ghost, leave the rest ---
+# zsh-autosuggestions already does partial-accept on `forward-word`; we just give it
+# a discoverable key (Ctrl-Right by default). Also keeps Ctrl-Right's normal job.
+bindkey "$AIZSH_WORD_ACCEPT_KEY" forward-word
 
 # --- `prompt <natural language>` -> command, with editable approval -----
 prompt() {
@@ -345,10 +412,19 @@ aizsh() {
 # leading commands where a non-zero exit is normal — never offer a fix for these
 : ${AIZSH_AUTOFIX_SKIP:="grep egrep fgrep rg ag ack diff colordiff cmp test pgrep pkill which type whence man less more fzf ssh nvim vim vi nano ping"}
 
-_aizsh_preexec() { AIZSH_LAST_CMD="$1"; AIZSH_RAN=1; }
+_aizsh_preexec() { AIZSH_LAST_CMD="$1"; AIZSH_RAN=1; _AIZSH_EXEC_PWD="$PWD"; }
 
 # Stash a fix request; the next empty prompt turns it into grey ghost text.
 _aizsh_stash_fix() { typeset -g _AIZSH_FIX_EC="$1" _AIZSH_FIX_CMD="$2"; }
+
+# Feed a finished command into the daemon's statistical layer (socket-only).
+_aizsh_record() {   # $1 = command, $2 = "<exit>\x1e<prev command>"
+    [[ "$AIZSH_STATS" == 1 ]] || return
+    [[ -S "$AIZSH_SOCK" ]] || return
+    local frame
+    frame="record"$'\x1f'"$(_aizsh_b64 "$1")"$'\x1f'"$(_aizsh_b64 "${_AIZSH_EXEC_PWD:-$PWD}")"$'\x1f'"$(_aizsh_b64 "$2")"
+    AIZSH_READ_TIMEOUT=0.3 _aizsh_via_socket "$frame" >/dev/null 2>&1
+}
 
 _aizsh_precmd() {
     local ec=$?
@@ -362,6 +438,9 @@ _aizsh_precmd() {
     fi
     [[ -n $AIZSH_RAN ]] || return            # nothing actually ran (empty prompt)
     AIZSH_RAN=
+    # record the command into the statistical layer, then remember it as `prev`
+    _aizsh_record "$AIZSH_LAST_CMD" "${ec}"$'\x1e'"${_AIZSH_PREV_CMD}"
+    typeset -g _AIZSH_PREV_CMD="$AIZSH_LAST_CMD"
     [[ "$AIZSH_AUTOFIX" == 1 ]] || return
     _aizsh_have_ai || return
     (( ec == 0 ))   && return

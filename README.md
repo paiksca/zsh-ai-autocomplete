@@ -127,6 +127,15 @@ Open a new shell, then run **`aizsh doctor`** to verify.
 * **Typing into the ghost never re-queries:** if your buffer is just you typing
   what the suggestion already shows, the remaining ghost is served from cache
   (prefix-aware) in ~1 ms — the model only runs when you *diverge* from it.
+* **Instant statistical layer (best of both worlds):** the daemon also keeps a
+  fast model of your habits — **frecency** (frequency + recency), **directory
+  affinity**, **command sequences** (`make build` → `make test`), and **success
+  rate** (failed commands rank lower), seeded from your `~/.zsh_history`. On every
+  keystroke it renders an *instant* guess (~ms) as grey text, and the LLM
+  **refines/replaces it** when it lands a beat later. So you get statistical speed
+  *and* LLM intelligence. Empty-prompt next-command prediction is instant too.
+* **Word-by-word accept:** Tab takes the whole ghost; **Ctrl-Right** takes just the
+  next word (then keep typing or take another). Rebind via `AIZSH_WORD_ACCEPT_KEY`.
 
 ---
 
@@ -158,6 +167,10 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_FIX_MODEL` | ghost model | model for auto-fix (default = the always-warm coder, for speed) |
 | `AIZSH_AUTOFIX_SKIP` | grep, diff, test, … | leading commands where non-zero is normal (no fix) |
 | `AIZSH_PREDICT` | `1` | predict the next command on an empty prompt |
+| `AIZSH_STATS` | `1` | instant statistical ghost (frecency/dir/sequence) shown under the LLM |
+| `AIZSH_WORD_ACCEPT_KEY` | `^[[1;5C` | key (Ctrl-Right) to accept the next *word* of the ghost |
+| `AIZSH_STATS_FILE` | `~/.cache/ai-zsh/stats.json` | where the learned command stats persist |
+| `AIZSH_STATS_HALFLIFE` | `7` | recency half-life (days) for frecency scoring |
 | `AIZSH_BASE_URL` | — | OpenAI-compatible server (llama.cpp, LM Studio, vLLM) |
 | `AIZSH_API_KEY` | — | bearer token for `openai` provider (if needed) |
 | `GEMINI_API_KEY` | (from Keychain) | required for `gemini` provider |

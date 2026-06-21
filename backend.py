@@ -23,6 +23,7 @@ Response frame:
 
 import base64
 import json
+import math
 import os
 import platform
 import re
@@ -588,6 +589,160 @@ def cache_prefix_get(pwd, buffer):
 
 
 # --------------------------------------------------------------------------- #
+# Statistical layer — instant frecency / directory / sequence / success-rate   #
+# suggestions, rendered immediately while the LLM refines asynchronously.       #
+# --------------------------------------------------------------------------- #
+STATS_FILE = os.environ.get("AIZSH_STATS_FILE") or os.path.join(
+    os.path.expanduser("~"), ".cache", "ai-zsh", "stats.json")
+STATS_HALFLIFE = float(os.environ.get("AIZSH_STATS_HALFLIFE", "7"))   # recency half-life, days
+_CMD = {}     # command -> {"n":int, "last":float, "dirs":{pwd:count}, "ok":int, "fail":int}
+_SEQ = {}     # prev_command -> {next_command: count}
+_STATS_LOCK = threading.Lock()
+_STATS_DIRTY = [0]
+_NL_RE = re.compile(r"^\s*(prompt|ai|ask|aizsh)\b")
+
+
+def _stats_record(cmd, pwd, exit_code, prev):
+    cmd = (cmd or "").strip()
+    if not cmd or len(cmd) > 256 or _NL_RE.match(cmd):
+        return
+    now = time.time()
+    with _STATS_LOCK:
+        e = _CMD.get(cmd)
+        if e is None:
+            e = _CMD[cmd] = {"n": 0, "last": 0.0, "dirs": {}, "ok": 0, "fail": 0}
+        e["n"] += 1
+        e["last"] = now
+        if pwd:
+            e["dirs"][pwd] = e["dirs"].get(pwd, 0) + 1
+            if len(e["dirs"]) > 24:                      # bound per-command dir map
+                del e["dirs"][min(e["dirs"], key=e["dirs"].get)]
+        e["ok" if exit_code == 0 else "fail"] += 1
+        prev = (prev or "").strip()
+        if prev and not _NL_RE.match(prev):
+            _SEQ.setdefault(prev, {})
+            _SEQ[prev][cmd] = _SEQ[prev].get(cmd, 0) + 1
+        _STATS_DIRTY[0] += 1
+        dirty = _STATS_DIRTY[0]
+    if dirty >= 20:
+        _stats_save()
+
+
+def _frecency(e, now):
+    age_days = max(0.0, (now - e["last"]) / 86400.0)
+    return math.log(e["n"] + 1.0) * math.exp(-age_days / STATS_HALFLIFE)
+
+
+def stats_suggest(buffer, pwd, prev):
+    """Best statistical match. Non-empty buffer -> highest-scoring command that starts
+    with it; empty buffer -> most likely next command. Returns a FULL command line ('' if none)."""
+    buffer = buffer or ""
+    if buffer and _NL_RE.match(buffer):
+        return ""
+    prev = (prev or "").strip()
+    now = time.time()
+    with _STATS_LOCK:
+        if buffer:
+            best, best_score = "", 0.0
+            for cmd, e in _CMD.items():
+                if len(cmd) <= len(buffer) or not cmd.startswith(buffer):
+                    continue
+                score = _frecency(e, now)
+                if pwd and e["dirs"].get(pwd):
+                    score *= 1.0 + 2.0 * (e["dirs"][pwd] / e["n"])      # directory affinity
+                if prev and _SEQ.get(prev, {}).get(cmd):
+                    score *= 1.5                                        # command sequence
+                tot = e["ok"] + e["fail"]
+                if tot:
+                    score *= 0.5 + 0.5 * (e["ok"] / tot)                # success rate
+                if score > best_score:
+                    best, best_score = cmd, score
+            return best
+        cand = {}                                                       # empty prompt -> predict next
+        seq = _SEQ.get(prev, {})
+        seq_total = sum(seq.values()) or 1
+        for nxt, c in seq.items():
+            cand[nxt] = cand.get(nxt, 0.0) + 3.0 * (c / seq_total)      # P(next|prev) dominates
+        fr = {cmd: _frecency(e, now) for cmd, e in _CMD.items()}
+        fmax = max(fr.values()) if fr else 1.0
+        for cmd, e in _CMD.items():
+            sc = fr[cmd] / fmax                                         # normalized global prior
+            if pwd and e["dirs"].get(pwd):
+                sc *= 1.0 + 0.5 * (e["dirs"][pwd] / e["n"])             # mild directory affinity
+            cand[cmd] = cand.get(cmd, 0.0) + sc
+        return max(cand, key=cand.get) if cand else ""
+
+
+def _stats_save():
+    try:
+        with _STATS_LOCK:
+            blob = json.dumps({"cmd": _CMD, "seq": _SEQ})
+            _STATS_DIRTY[0] = 0
+        os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
+        tmp = STATS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(blob)
+        os.replace(tmp, STATS_FILE)
+    except OSError as e:
+        log("stats save failed:", e)
+
+
+def _stats_load():
+    try:
+        with open(STATS_FILE) as f:
+            data = json.load(f)
+        with _STATS_LOCK:
+            _CMD.clear(); _CMD.update(data.get("cmd", {}))
+            _SEQ.clear(); _SEQ.update(data.get("seq", {}))
+        log("stats loaded:", len(_CMD), "commands")
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _stats_seed_from_history():
+    """First run: seed frecency + sequence from ~/.zsh_history (no dir/exit info)."""
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".zsh_history"), "rb") as f:
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return
+    cmds = []
+    for line in raw.splitlines():
+        m = re.match(r"^: \d+:\d+;(.*)$", line)          # extended history: ": <ts>:<elapsed>;<cmd>"
+        c = (m.group(1) if m else line).strip()
+        if c and not _NL_RE.match(c) and len(c) <= 256:
+            cmds.append(c)
+    now = time.time()
+    with _STATS_LOCK:
+        prev = ""
+        for c in cmds[-5000:]:                            # cap the seed
+            e = _CMD.get(c)
+            if e is None:
+                e = _CMD[c] = {"n": 0, "last": now, "dirs": {}, "ok": 0, "fail": 0}
+            e["n"] += 1; e["ok"] += 1
+            if prev:
+                _SEQ.setdefault(prev, {})
+                _SEQ[prev][c] = _SEQ[prev].get(c, 0) + 1
+            prev = c
+    log("stats seeded from history:", len(_CMD), "commands")
+
+
+def do_record(text, pwd, extra):
+    exit_s, _, prev = (extra or "").partition("\x1e")    # extra = "<exit>\x1e<prev cmd>"
+    try:
+        ec = int(exit_s)
+    except ValueError:
+        ec = 0
+    _stats_record(text, pwd, ec, prev)
+    return {"ok": True}
+
+
+def do_stats(text, pwd, extra):
+    return {"suggestion": stats_suggest(text, pwd, extra or "")}   # extra = prev cmd
+
+
+# --------------------------------------------------------------------------- #
 # Prompts                                                                       #
 # --------------------------------------------------------------------------- #
 TOOL_NOTE = (
@@ -1030,6 +1185,10 @@ def handle_frame(raw):
             result = do_fix(text, pwd, history)
         elif mode == "predict":
             result = do_predict(text, pwd, history)
+        elif mode == "stats":
+            result = do_stats(text, pwd, history)      # field 3 = prev command
+        elif mode == "record":
+            result = do_record(text, pwd, history)     # field 3 = "<exit>\x1e<prev>"
         else:
             result = {"error": f"unknown mode {mode}"}
     except Exception as e:  # never crash the daemon on a single bad request
@@ -1056,8 +1215,11 @@ class Handler(socketserver.StreamRequestHandler):
         mode = raw.split(US.encode(), 1)[0]
         if mode == b"ping":
             self._send(b"pong\n"); return
+        if mode == b"record" or mode == b"stats":
+            self._send(handle_frame(raw)); return    # fast in-memory; no thread/cancel
         if mode == b"shutdown":
             self._send(b"bye\n")
+            _stats_save()
             try: os.unlink(SOCK_PATH)
             except OSError: pass
             os._exit(0)
@@ -1120,6 +1282,7 @@ def _watchdog():
         time.sleep(60)
         if time.time() - _LAST[0] > IDLE_EXIT:
             log("idle exit")
+            _stats_save()
             try: os.unlink(SOCK_PATH)
             except OSError: pass
             os._exit(0)
@@ -1139,6 +1302,8 @@ def serve():
         server = Server(SOCK_PATH, Handler)
     finally:
         os.umask(old)
+    if not _stats_load():            # first run: seed the statistical layer from history
+        _stats_seed_from_history()
     threading.Thread(target=_watchdog, daemon=True).start()
     log("listening on", SOCK_PATH, "ghost=", GHOST_MODEL, "prompt=", PROMPT_MODEL)
     try:
@@ -1237,6 +1402,20 @@ def main():
         raw = _frame("predict", "", pwd, history).encode("utf-8")
         resp = handle_frame(raw).rstrip(b"\n")
         print(json.dumps(json.loads(base64.b64decode(resp)), indent=2))
+    elif cmd == "stats":
+        _stats_load() or _stats_seed_from_history()
+        buf = sys.argv[2] if len(sys.argv) > 2 else ""
+        pwd = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
+        prev = sys.argv[4] if len(sys.argv) > 4 else ""
+        print(json.dumps(do_stats(buf, pwd, prev)))
+    elif cmd == "record":
+        _stats_load()
+        ctext = sys.argv[2] if len(sys.argv) > 2 else ""
+        pwd = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
+        ec = sys.argv[4] if len(sys.argv) > 4 else "0"
+        prev = sys.argv[5] if len(sys.argv) > 5 else ""
+        do_record(ctext, pwd, f"{ec}\x1e{prev}"); _stats_save()
+        print("recorded:", ctext, "(", len(_CMD), "commands tracked )")
     elif cmd == "ping":
         print("pong" if _another_daemon_alive() else "no daemon")
     elif cmd == "stop":
