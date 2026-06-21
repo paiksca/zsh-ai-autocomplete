@@ -42,12 +42,16 @@ It replaces the experience of `zsh-autosuggestions` (history-only) and the old
    ```
    $ gti status
    zsh: command not found: gti
-   $ git status        ← grey ghost; Tab accepts, Enter dismisses
+   ✦ ai-fix finding a correction…   ← instant marker (so you know it triggered)
+   $ git status        ← grey ghost a beat later; Tab accepts, Enter dismisses
    ```
-   Handles typos, wrong flags, missing `sudo`, `command not found` (incl.
-   `brew install …`). Nothing runs without you. Skips failures where non-zero is
-   normal (`grep`, `diff`, `test`, …) and aborts (Ctrl-C / exit ≥128). Takes
-   priority over a generic prediction. Toggle: `aizsh autofix off`.
+   The `✦ ai-fix` marker prints immediately (no waiting), then the grey correction
+   appears async — and because predictions/autocomplete stay unlabeled, you can
+   tell a fix apart from them. Handles typos, wrong flags, missing `sudo`,
+   `command not found` (incl. `brew install …`). Nothing runs without you. Skips
+   failures where non-zero is normal (`grep`, `diff`, `test`, …) and aborts
+   (Ctrl-C / exit ≥128). Takes priority over a generic prediction.
+   Toggles: `aizsh autofix off`; `AIZSH_AUTOFIX_HINT=0` to hide the marker.
 4. **Uses zoxide & fzf when it helps** — the model is instructed to emit `z
    <kw>` to jump to frecent dirs, and to pipe through `fzf` when *you* need to
    choose (a file to edit, a branch to switch to, a process to kill). When it
@@ -145,6 +149,7 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_THINK` | `0` | enable thinking for `prompt` (qwen3.x) — better on hard tasks, but +25-50s |
 | `AIZSH_THINK_TOKENS` | `1500` | token budget when thinking |
 | `AIZSH_AUTOFIX` | `1` | suggest a fix (grey ghost text) when a command fails / isn't found |
+| `AIZSH_AUTOFIX_HINT` | `1` | print a "✦ ai-fix…" marker when a fix is being fetched |
 | `AIZSH_AUTOFIX_SKIP` | grep, diff, test, … | leading commands where non-zero is normal (no fix) |
 | `AIZSH_PREDICT` | `1` | predict the next command on an empty prompt |
 | `AIZSH_BASE_URL` | — | OpenAI-compatible server (llama.cpp, LM Studio, vLLM) |

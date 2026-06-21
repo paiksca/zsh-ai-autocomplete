@@ -89,11 +89,16 @@ _aizsh_fetch_spin() {
     local pid=$! skipped= i=1
     local chars=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
     trap 'skipped=1' INT
+    local key
     # spinner goes to STDERR so it never pollutes the captured JSON on stdout
     while kill -0 $pid 2>/dev/null; do
         [[ -n $skipped ]] && { kill $pid 2>/dev/null; break; }
-        printf '\r%s%s %s… (⌃C to skip)%s' "$DIM" "${chars[i]}" "$label" "$RST" >&2
-        i=$(( i % 10 + 1 )); command sleep 0.1
+        printf '\r%s%s %s… (Enter to dismiss)%s' "$DIM" "${chars[i]}" "$label" "$RST" >&2
+        i=$(( i % 10 + 1 ))
+        # read a key for up to 0.1s (doubles as the frame delay); Enter cancels
+        if read -t 0.1 -k 1 -s key 2>/dev/null; then
+            [[ "$key" == $'\n' || "$key" == $'\r' ]] && { kill $pid 2>/dev/null; skipped=1; break; }
+        fi
     done
     trap - INT
     printf '\r\e[K' >&2
@@ -330,6 +335,7 @@ aizsh() {
 # the failure here; the empty-prompt `ai` strategy (above) renders it, taking
 # priority over a generic prediction.
 : ${AIZSH_AUTOFIX:=1}              # suggest a fix (ghost text) when a command fails
+: ${AIZSH_AUTOFIX_HINT:=1}        # print a "✦ ai-fix…" marker so you know a fix is coming
 # leading commands where a non-zero exit is normal — never offer a fix for these
 : ${AIZSH_AUTOFIX_SKIP:="grep egrep fgrep rg ag ack diff colordiff cmp test pgrep pkill which type whence man less more fzf ssh nvim vim vi nano ping"}
 
@@ -353,6 +359,10 @@ _aizsh_precmd() {
     [[ " $AIZSH_AUTOFIX_SKIP " == *" $first "* ]] && return
     [[ $first == (prompt|ai|ask|aizsh) ]] && return
     _aizsh_stash_fix "$ec" "$AIZSH_LAST_CMD"
+    # instant, non-blocking marker so you know a fix is being fetched (the grey
+    # ghost itself appears a beat later on the prompt below)
+    [[ "$AIZSH_AUTOFIX_HINT" == 1 ]] && \
+        print -r -- $'\e[36m✦ ai-fix\e[0m \e[2mfinding a correction… (Tab to accept · Enter to dismiss)\e[0m'
 }
 
 # Note: we deliberately do NOT define command_not_found_handler — zsh runs it in a
