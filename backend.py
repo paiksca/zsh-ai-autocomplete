@@ -633,17 +633,66 @@ def _frecency(e, now):
     return math.log(e["n"] + 1.0) * math.exp(-age_days / STATS_HALFLIFE)
 
 
+# ecosystem keywords used to boost project-relevant commands (cheap context awareness)
+_ECO_KEYWORDS = {
+    "Node": ("npm", "npx", "yarn", "pnpm", "bun", "node"),
+    "Python": ("python", "python3", "pip", "pip3", "pytest", "poetry", "uv", "ruff"),
+    "Rust": ("cargo", "rustc", "rustup"),
+    "Go": ("go",),
+    "Make": ("make",),
+    "just": ("just",),
+    "Docker": ("docker", "docker-compose"),
+    "Ruby": ("bundle", "rake", "ruby", "gem"),
+    "Maven": ("mvn",),
+    "Gradle": ("gradle", "./gradlew"),
+}
+
+
+def _eco_prefixes(types):
+    out = set()
+    for t in types:
+        for key, kws in _ECO_KEYWORDS.items():
+            if key in t:
+                out.update(kws)
+    return out
+
+
+def _context_cached(pwd):
+    """Cached project context ONLY — never recompute, so the stats path stays fast.
+    (do_ghost/do_predict warm this cache via context(); stats just rides along.)"""
+    if not pwd:
+        return None
+    with _CTX_LOCK:
+        hit = _CTX_CACHE.get(pwd)
+        if hit and time.time() - hit[0] < CTX_TTL:
+            return hit[1]
+    return None
+
+
 def stats_suggest(buffer, pwd, prev):
-    """Best statistical match. Non-empty buffer -> highest-scoring command that starts
-    with it; empty buffer -> most likely next command. Returns a FULL command line ('' if none)."""
+    """Best statistical match, project-context aware. Non-empty buffer -> highest-scoring
+    command that starts with it; empty buffer -> most likely next command. Returns a FULL
+    command line ('' if none)."""
     buffer = buffer or ""
     if buffer and _NL_RE.match(buffer):
         return ""
     prev = (prev or "").strip()
     now = time.time()
+    proj = (_context_cached(pwd) or {}).get("project", {})
+    targets = proj.get("targets", []) or []          # commands actually runnable here
+    ecos = _eco_prefixes(proj.get("types", []) or [])
+
+    def eco_boost(cmd):
+        return 1.6 if ecos and cmd.split(" ", 1)[0] in ecos else 1.0
+
     with _STATS_LOCK:
         if buffer:
             best, best_score = "", 0.0
+            for t in targets:                        # a runnable target that extends the buffer
+                if t.startswith(buffer) and len(t) > len(buffer):
+                    sc = 3.0 * eco_boost(t)
+                    if sc > best_score:
+                        best, best_score = t, sc
             for cmd, e in _CMD.items():
                 if len(cmd) <= len(buffer) or not cmd.startswith(buffer):
                     continue
@@ -655,6 +704,7 @@ def stats_suggest(buffer, pwd, prev):
                 tot = e["ok"] + e["fail"]
                 if tot:
                     score *= 0.5 + 0.5 * (e["ok"] / tot)                # success rate
+                score *= eco_boost(cmd)                                 # project ecosystem
                 if score > best_score:
                     best, best_score = cmd, score
             return best
@@ -669,7 +719,10 @@ def stats_suggest(buffer, pwd, prev):
             sc = fr[cmd] / fmax                                         # normalized global prior
             if pwd and e["dirs"].get(pwd):
                 sc *= 1.0 + 0.5 * (e["dirs"][pwd] / e["n"])             # mild directory affinity
+            sc *= eco_boost(cmd)
             cand[cmd] = cand.get(cmd, 0.0) + sc
+        for t in targets:                                               # likely next action here
+            cand[t] = cand.get(t, 0.0) + 1.5
         return max(cand, key=cand.get) if cand else ""
 
 
@@ -726,6 +779,52 @@ def _stats_seed_from_history():
                 _SEQ[prev][c] = _SEQ[prev].get(c, 0) + 1
             prev = c
     log("stats seeded from history:", len(_CMD), "commands")
+
+
+# A baseline of common commands + sequences so a fresh install is useful from the
+# first keystroke. Added at low weight (ancient timestamp) so real usage quickly wins.
+_COMMON_CMDS = [
+    "git status", "git add .", "git add -A", 'git commit -m ""', "git push", "git pull",
+    "git checkout ", "git checkout -b ", "git branch", "git log --oneline -20", "git diff",
+    "git diff --staged", "git stash", "git stash pop", "git merge ", "git rebase ",
+    "git reset --hard", "git clone ", "git fetch", "git remote -v", "git restore ",
+    "npm install", "npm run dev", "npm run build", "npm run test", "npm start", "npm ci",
+    "yarn install", "yarn dev", "yarn build", "pnpm install", "pnpm dev", "pnpm build", "npx ",
+    "docker ps", "docker images", "docker build -t ", "docker run -it ", "docker logs ",
+    "docker exec -it ", "docker compose up -d", "docker compose down", "docker compose logs -f",
+    "cargo build", "cargo test", "cargo run", "cargo check", "cargo clippy",
+    "go build ./...", "go test ./...", "go run .", "go mod tidy",
+    "make", "make build", "make test", "make clean", "make install",
+    "python3 -m venv .venv", "source .venv/bin/activate", "pip install -r requirements.txt",
+    "pip install ", "pytest", "python3 ", "python3 -m ",
+    "ls -la", "cd ", "cd ..", "mkdir -p ", "rm -rf ", "cp -r ", "mv ", "cat ", "less ",
+    "grep -rn ", "find . -name ", "chmod +x ", "tar -xzf ", "curl -fsSL ", "open .",
+    "kubectl get pods", "kubectl get svc", "kubectl logs ", "kubectl apply -f ",
+    "brew install ", "brew update", "brew upgrade", "ssh ", "scp ", "code .",
+]
+_COMMON_SEQ = [
+    ("git add .", 'git commit -m ""'), ("git add -A", 'git commit -m ""'),
+    ('git commit -m ""', "git push"), ("git status", "git add ."),
+    ("git checkout ", "git pull"), ("git clone ", "cd "), ("git pull", "npm install"),
+    ("npm install", "npm run dev"), ("yarn install", "yarn dev"),
+    ("make build", "make test"), ("cargo build", "cargo test"),
+    ("go build ./...", "go test ./..."), ("docker build -t ", "docker run -it "),
+    ("docker compose up -d", "docker compose logs -f"), ("cd ", "ls -la"),
+    ("mkdir -p ", "cd "), ("python3 -m venv .venv", "source .venv/bin/activate"),
+    ("source .venv/bin/activate", "pip install -r requirements.txt"),
+]
+
+
+def _stats_preload():
+    """Ensure baseline common commands/sequences exist. Fills gaps only — never
+    overrides learned counts (existing entries are left untouched)."""
+    old = time.time() - 60 * 86400          # ~0 recency: real usage outranks these fast
+    with _STATS_LOCK:
+        for c in _COMMON_CMDS:
+            if c not in _CMD:
+                _CMD[c] = {"n": 1, "last": old, "dirs": {}, "ok": 1, "fail": 0}
+        for prev, nxt in _COMMON_SEQ:
+            _SEQ.setdefault(prev, {}).setdefault(nxt, 1)
 
 
 def do_record(text, pwd, extra):
@@ -1304,6 +1403,7 @@ def serve():
         os.umask(old)
     if not _stats_load():            # first run: seed the statistical layer from history
         _stats_seed_from_history()
+    _stats_preload()                 # always top up baseline common commands (fills gaps)
     threading.Thread(target=_watchdog, daemon=True).start()
     log("listening on", SOCK_PATH, "ghost=", GHOST_MODEL, "prompt=", PROMPT_MODEL)
     try:
@@ -1404,6 +1504,7 @@ def main():
         print(json.dumps(json.loads(base64.b64decode(resp)), indent=2))
     elif cmd == "stats":
         _stats_load() or _stats_seed_from_history()
+        _stats_preload()
         buf = sys.argv[2] if len(sys.argv) > 2 else ""
         pwd = sys.argv[3] if len(sys.argv) > 3 else os.getcwd()
         prev = sys.argv[4] if len(sys.argv) > 4 else ""

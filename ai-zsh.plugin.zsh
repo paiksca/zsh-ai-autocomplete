@@ -109,11 +109,11 @@ _aizsh_fetch_spin() {
     # spinner goes to STDERR so it never pollutes the captured JSON on stdout
     while kill -0 $pid 2>/dev/null; do
         [[ -n $skipped ]] && { kill $pid 2>/dev/null; break; }
-        printf '\r%s%s %s… (Enter to dismiss)%s' "$DIM" "${chars[i]}" "$label" "$RST" >&2
+        printf '\r%s%s %s… (Esc to dismiss)%s' "$DIM" "${chars[i]}" "$label" "$RST" >&2
         i=$(( i % 10 + 1 ))
-        # read a key for up to 0.1s (doubles as the frame delay); Enter cancels
+        # read a key for up to 0.1s (doubles as the frame delay); Esc cancels
         if read -t 0.1 -k 1 -s key 2>/dev/null; then
-            [[ "$key" == $'\n' || "$key" == $'\r' ]] && { kill $pid 2>/dev/null; skipped=1; break; }
+            [[ "$key" == $'\e' ]] && { kill $pid 2>/dev/null; skipped=1; break; }
         fi
     done
     trap - INT
@@ -293,8 +293,9 @@ zle -N _aizsh_force_widget
 bindkey "$AIZSH_FORCE_KEY" _aizsh_force_widget
 
 # --- word-by-word acceptance: take the next word of the ghost, leave the rest ---
-# zsh-autosuggestions already does partial-accept on `forward-word`; we just give it
-# a discoverable key (Ctrl-Right by default). Also keeps Ctrl-Right's normal job.
+# Ctrl-Right (zsh-autosuggestions partial-accepts on `forward-word`). Tab still
+# accepts the whole ghost. Left as Ctrl-Right so the plain Right arrow keeps its
+# normal one-character cursor move and never interferes with editing.
 bindkey "$AIZSH_WORD_ACCEPT_KEY" forward-word
 
 # --- `prompt <natural language>` -> command, with editable approval -----

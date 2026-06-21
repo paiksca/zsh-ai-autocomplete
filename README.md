@@ -132,10 +132,17 @@ Open a new shell, then run **`aizsh doctor`** to verify.
   affinity**, **command sequences** (`make build` → `make test`), and **success
   rate** (failed commands rank lower), seeded from your `~/.zsh_history`. On every
   keystroke it renders an *instant* guess (~ms) as grey text, and the LLM
-  **refines/replaces it** when it lands a beat later. So you get statistical speed
-  *and* LLM intelligence. Empty-prompt next-command prediction is instant too.
-* **Word-by-word accept:** Tab takes the whole ghost; **Ctrl-Right** takes just the
-  next word (then keep typing or take another). Rebind via `AIZSH_WORD_ACCEPT_KEY`.
+  **refines/replaces it** when it lands a beat later (no keystroke needed). So you
+  get statistical speed *and* LLM intelligence. Empty-prompt prediction is instant too.
+  * **Smart from day one:** preloaded with common commands + sequences (git, npm,
+    docker, cargo, …) so a fresh install is useful before it's learned anything.
+  * **Context-aware, cheaply:** boosts commands that fit the current project and
+    suggests its real runnable targets (`npm run build`, `cargo test`, `make …`) —
+    using the already-cached folder context, so it stays instant and complements
+    what the LLM does with the full context.
+* **Simple, consistent keys:** **Tab** accepts the whole ghost, **Ctrl-Right**
+  accepts the next word, **Esc** dismisses (the `prompt` spinner). Rebind word-accept
+  via `AIZSH_WORD_ACCEPT_KEY`.
 
 ---
 
