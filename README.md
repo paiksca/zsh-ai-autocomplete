@@ -178,6 +178,7 @@ These live in this folder and are sourced from `~/.zshrc`.
 | `AIZSH_WORD_ACCEPT_KEY` | `^[[1;5C` | key (Ctrl-Right) to accept the next *word* of the ghost |
 | `AIZSH_STATS_FILE` | `~/.cache/ai-zsh/stats.json` | where the learned command stats persist |
 | `AIZSH_STATS_HALFLIFE` | `7` | recency half-life (days) for frecency scoring |
+| `AIZSH_STATS_MAX` | `4000` | cap on learned commands (lowest-frecency evicted on save) |
 | `AIZSH_BASE_URL` | — | OpenAI-compatible server (llama.cpp, LM Studio, vLLM) |
 | `AIZSH_API_KEY` | — | bearer token for `openai` provider (if needed) |
 | `GEMINI_API_KEY` | (from Keychain) | required for `gemini` provider |

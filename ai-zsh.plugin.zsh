@@ -111,9 +111,13 @@ _aizsh_fetch_spin() {
         [[ -n $skipped ]] && { kill $pid 2>/dev/null; break; }
         printf '\r%s%s %s… (Esc to dismiss)%s' "$DIM" "${chars[i]}" "$label" "$RST" >&2
         i=$(( i % 10 + 1 ))
-        # read a key for up to 0.1s (doubles as the frame delay); Esc cancels
-        if read -t 0.1 -k 1 -s key 2>/dev/null; then
-            [[ "$key" == $'\e' ]] && { kill $pid 2>/dev/null; skipped=1; break; }
+        # read a key for up to 0.1s (doubles as the frame delay); bare Esc cancels
+        if read -t 0.1 -k 1 -s key 2>/dev/null && [[ "$key" == $'\e' ]]; then
+            if read -t 0.02 -k 1 -s 2>/dev/null; then
+                while read -t 0.005 -k 1 -s 2>/dev/null; do :; done   # arrow/fn key → drain, keep spinning
+            else
+                kill $pid 2>/dev/null; skipped=1; break               # bare Esc → dismiss
+            fi
         fi
     done
     trap - INT
@@ -127,7 +131,8 @@ _aizsh_fetch_spin() {
 # --- daemon lifecycle -------------------------------------------------
 _aizsh_daemon_alive() {
     [[ -S "$AIZSH_SOCK" ]] || return 1
-    [[ "$(_aizsh_via_socket ping)" == pong* ]]
+    # short timeout: a live-but-wedged daemon must never stall shell startup
+    [[ "$(AIZSH_READ_TIMEOUT=0.5 _aizsh_via_socket ping)" == pong* ]]
 }
 
 _aizsh_start_daemon() {
@@ -219,12 +224,13 @@ _zsh_autosuggest_fetch_suggestion() {
 # --- statistical layer: instant local guess (frecency/dir/sequence) ----
 # Socket-only (never one-shot — that would fork python per keystroke and read an
 # empty store); short timeout so a slow/missing daemon never blocks typing.
-_aizsh_stats_lookup() {   # $1 = buffer; echoes the full statistical suggestion
+_aizsh_stats_lookup() {   # $1 = buffer; echoes the raw statistical suggestion
     [[ -S "$AIZSH_SOCK" ]] || return 1
-    local frame resp
-    frame="stats"$'\x1f'"$(_aizsh_b64 "$1")"$'\x1f'"${_AIZSH_PWD_B64:-$(_aizsh_b64 "$PWD")}"$'\x1f'"$(_aizsh_b64 "$AIZSH_PREV_CMD")"
-    resp="$(AIZSH_READ_TIMEOUT=0.3 _aizsh_via_socket "$frame")" || return 1
-    [[ -n "$resp" ]] && _aizsh_b64d "$resp" | _aizsh_json_get suggestion
+    # `stats` mode returns the RAW suggestion line (not base64-JSON) so the per-keystroke
+    # hot path skips `base64 -d` + `jq`. PWD/prev are pre-encoded by precmd (cached).
+    local frame
+    frame="stats"$'\x1f'"$(_aizsh_b64 "$1")"$'\x1f'"${_AIZSH_PWD_B64:-$(_aizsh_b64 "$PWD")}"$'\x1f'"${_AIZSH_PREV_B64-$(_aizsh_b64 "$_AIZSH_PREV_CMD")}"
+    AIZSH_READ_TIMEOUT=0.3 _aizsh_via_socket "$frame"
 }
 
 # stats strategy (async fallback): used when the LLM is empty/slow/offline
@@ -442,6 +448,7 @@ _aizsh_precmd() {
     # record the command into the statistical layer, then remember it as `prev`
     _aizsh_record "$AIZSH_LAST_CMD" "${ec}"$'\x1e'"${_AIZSH_PREV_CMD}"
     typeset -g _AIZSH_PREV_CMD="$AIZSH_LAST_CMD"
+    typeset -g _AIZSH_PREV_B64="$(_aizsh_b64 "$AIZSH_LAST_CMD")"   # cached for per-keystroke stats
     [[ "$AIZSH_AUTOFIX" == 1 ]] || return
     _aizsh_have_ai || return
     (( ec == 0 ))   && return

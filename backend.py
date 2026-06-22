@@ -678,11 +678,12 @@ def stats_suggest(buffer, pwd, prev):
         return ""
     prev = (prev or "").strip()
     now = time.time()
-    # The once-per-prompt prediction (empty buffer) can afford to COMPUTE context if
-    # it's cold, so the instant guess is project-aware even right after a `cd`. The
-    # per-keystroke ghost path stays cache-only so it never blocks typing.
-    ctx = context(pwd) if not buffer else _context_cached(pwd)
-    proj = (ctx or {}).get("project", {})
+    # Project awareness WITHOUT blocking: use the warm context if cached, else compute
+    # ONLY `_project` (file-existence + small file reads — no git/zoxide/ls subprocess).
+    # So the instant guess is project-aware even right after a `cd`, but the inline
+    # handler never runs slow subprocesses (the LLM path warms the full context cache).
+    cc = _context_cached(pwd)
+    proj = cc.get("project", {}) if cc else (_project(pwd) if pwd else {})
     targets = proj.get("targets", []) or []          # commands actually runnable here
     ecos = _eco_prefixes(proj.get("types", []) or [])
 
@@ -730,16 +731,37 @@ def stats_suggest(buffer, pwd, prev):
         return max(cand, key=cand.get) if cand else ""
 
 
+_MAX_CMDS = int(os.environ.get("AIZSH_STATS_MAX", "4000"))
+
+
+def _stats_evict():
+    """Bound memory/file growth (caller holds _STATS_LOCK): drop the lowest-frecency
+    commands and cap each sequence's fan-out."""
+    now = time.time()
+    if len(_CMD) > _MAX_CMDS:
+        for c in sorted(_CMD, key=lambda k: _frecency(_CMD[k], now))[:len(_CMD) - _MAX_CMDS]:
+            del _CMD[c]
+    for prev in list(_SEQ):
+        inner = _SEQ[prev]
+        if len(inner) > 24:
+            for k in sorted(inner, key=inner.get)[:len(inner) - 24]:
+                del inner[k]
+    if len(_SEQ) > _MAX_CMDS:
+        for prev in list(_SEQ)[:len(_SEQ) - _MAX_CMDS]:
+            del _SEQ[prev]
+
+
 def _stats_save():
     try:
         with _STATS_LOCK:
+            _stats_evict()
             blob = json.dumps({"cmd": _CMD, "seq": _SEQ})
-            _STATS_DIRTY[0] = 0
         os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
         tmp = STATS_FILE + ".tmp"
         with open(tmp, "w") as f:
             f.write(blob)
         os.replace(tmp, STATS_FILE)
+        _STATS_DIRTY[0] = 0          # clear the dirty counter ONLY after a successful write
     except OSError as e:
         log("stats save failed:", e)
 
@@ -748,12 +770,24 @@ def _stats_load():
     try:
         with open(STATS_FILE) as f:
             data = json.load(f)
+        cmd_in, seq_in = data.get("cmd", {}), data.get("seq", {})
+        if not isinstance(cmd_in, dict):
+            return False
+        if not isinstance(seq_in, dict):
+            seq_in = {}
+        cmd = {}                                   # normalize; skip malformed entries
+        for k, e in cmd_in.items():
+            if isinstance(e, dict) and "n" in e and "last" in e:
+                cmd[k] = {"n": int(e.get("n", 1)), "last": float(e.get("last", 0.0)),
+                          "dirs": e["dirs"] if isinstance(e.get("dirs"), dict) else {},
+                          "ok": int(e.get("ok", 0)), "fail": int(e.get("fail", 0))}
+        seq = {p: v for p, v in seq_in.items() if isinstance(v, dict)}
         with _STATS_LOCK:
-            _CMD.clear(); _CMD.update(data.get("cmd", {}))
-            _SEQ.clear(); _SEQ.update(data.get("seq", {}))
+            _CMD.clear(); _CMD.update(cmd)
+            _SEQ.clear(); _SEQ.update(seq)
         log("stats loaded:", len(_CMD), "commands")
         return True
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return False
 
 
@@ -1279,6 +1313,12 @@ def handle_frame(raw):
     text = _b64d(fields[1]) if len(fields) > 1 else ""
     pwd = _b64d(fields[2]) if len(fields) > 2 else ""
     history = _b64d(fields[3]) if len(fields) > 3 else ""
+    if mode == "stats":            # raw suggestion line (no base64/JSON) — per-keystroke hot path
+        try:
+            return do_stats(text, pwd, history).get("suggestion", "").encode("utf-8") + b"\n"
+        except Exception as e:
+            log("stats error:", repr(e))
+            return b"\n"
     try:
         if mode == "ghost":
             result = do_ghost(text, pwd, history)
@@ -1288,8 +1328,6 @@ def handle_frame(raw):
             result = do_fix(text, pwd, history)
         elif mode == "predict":
             result = do_predict(text, pwd, history)
-        elif mode == "stats":
-            result = do_stats(text, pwd, history)      # field 3 = prev command
         elif mode == "record":
             result = do_record(text, pwd, history)     # field 3 = "<exit>\x1e<prev>"
         else:
@@ -1408,6 +1446,13 @@ def serve():
     if not _stats_load():            # first run: seed the statistical layer from history
         _stats_seed_from_history()
     _stats_preload()                 # always top up baseline common commands (fills gaps)
+    import signal                    # persist learned stats on a SIGTERM (e.g. pkill/restart)
+    def _on_term(*_a):
+        _stats_save(); os._exit(0)
+    try:
+        signal.signal(signal.SIGTERM, _on_term)
+    except (ValueError, OSError):
+        pass
     threading.Thread(target=_watchdog, daemon=True).start()
     log("listening on", SOCK_PATH, "ghost=", GHOST_MODEL, "prompt=", PROMPT_MODEL)
     try:
